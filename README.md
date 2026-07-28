@@ -1,9 +1,11 @@
-# msdf-zig
-A Zig implementation of [Viktor Chlumský's multi-channel signed distance field generator](https://github.com/Chlumsky/msdfgen).
+# Mist
+A signed distance field generator with support for [Viktor Chlumský's MSDF technique](https://github.com/Chlumsky/msdfgen).
 
 ## Usage
+A simple example can be found below, with a more in-depth one in `example/generate.zig`.
+
 ```zig
-const Generator = @import("msdf-zig");
+const Generator = @import("mist");
 const font_data = @embedFile("OpenSans-Bold.ttf");
 
 var gen: Generator = try .create(font_data);
@@ -41,7 +43,5 @@ for ([_]u21{ 'A', 'B', 'C' }) |codepoint| {
 }
 ```
 
-A more in-depth example can be found in `example/generate.zig`.
-
-## Disclaimer
-This library might provide an option for it later, but you currently need to preprocess your fonts manually to resolve overlapping contours (if the font has them).
+## Note
+The library exposes a similar set of functionality to Chlumský's work, but it's not intended to be its equivalent, some features will be implemented differently and some will be intentionally omitted. Issues and PRs can still compare to msdfgen, like if the library generates a less correct SDF than it, but direct ports, or the request for them will be closed.
