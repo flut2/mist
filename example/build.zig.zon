@@ -1,6 +1,6 @@
 .{
-    .name = .msdf_zig_example,
-    .fingerprint = 0xc8e298b963b48ce4,
+    .name = .mist_example,
+    .fingerprint = 0x29060afdae31456b,
     .version = "1.0.0",
     .paths = .{
         "build.zig",
@@ -9,9 +9,9 @@
         "OFL.txt",
         "OpenSans-Bold.ttf",
     },
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .stbi = .{ .path = "libs/stbi" },
-        .msdf_zig = .{ .path = ".." },
+        .mist = .{ .path = ".." },
     },
 }

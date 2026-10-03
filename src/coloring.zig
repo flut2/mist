@@ -123,7 +123,9 @@ fn findCorners(allocator: std.mem.Allocator, contour: *const Shape.Contour, corn
 }
 
 fn symmetricalTrichotomy(pos: usize, n: usize) i32 {
-    return @as(i32, @trunc(3.0 + 2.875 * f64i(pos) / f64i(n - 1) - 1.4375 + 0.5)) - 3;
+    const ip: i32 = @intCast(pos);
+    const in: i32 = @intCast(n);
+    return @divFloor(3 * ip + 1, in) - 1;
 }
 
 fn estimateEdgeLength(edge: *const EdgeSegment) f64 {

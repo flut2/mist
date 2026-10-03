@@ -46,8 +46,14 @@ pub fn cross(a: Vec2, b: Vec2) f64 {
     return @mulAdd(f64, a[0], b[1], -a[1] * b[0]);
 }
 
-pub fn median(a: anytype, b: anytype, c: anytype) @TypeOf(a) {
-    return @max(@min(a, b), @min(@max(a, b), c));
+pub fn median(msdf_px: *const [3]f64) f64 {
+    return @max(
+        @min(msdf_px[0], msdf_px[1]),
+        @min(
+            @max(msdf_px[0], msdf_px[1]),
+            msdf_px[2],
+        ),
+    );
 }
 
 pub fn mix(a: anytype, b: anytype, t: anytype) @TypeOf(a, b) {

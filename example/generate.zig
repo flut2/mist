@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Generator = @import("msdf-zig");
+const Generator = @import("mist");
 const stbi = @import("stbi");
 
 fn printableAscii() []const u21 {
@@ -83,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(image.data, glyph.pixels);
 
         var path_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{u}_sdf.png", .{codepoint});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{u}_sdf.png", .{codepoint}, 0);
         try image.writeToFile(path, .png);
     }
 

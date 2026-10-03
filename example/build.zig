@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
 
-    const msdf_zig_mod = b.dependency("msdf_zig", .{ .target = target, .optimize = optimize });
+    const mist_dep = b.dependency("mist", .{ .target = target, .optimize = optimize });
     const stbi_dep = b.dependency("stbi", .{ .target = target, .optimize = optimize });
     const exe = b.addExecutable(.{
         .name = "Example",
@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "msdf-zig", .module = msdf_zig_mod.module("msdf-zig") },
+                .{ .name = "mist", .module = mist_dep.module("mist") },
                 .{ .name = "stbi", .module = stbi_dep.module("root") },
             },
         }),

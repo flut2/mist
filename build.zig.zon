@@ -1,6 +1,6 @@
 .{
-    .name = .msdf_zig,
-    .fingerprint = 0xdbbab973e30deae7,
+    .name = .mist,
+    .fingerprint = 0xfc749f7d2126c2dd,
     .version = "1.0.0",
     .paths = .{
         "LICENSE",
@@ -9,7 +9,7 @@
         "build.zig",
         "build.zig.zon",
     },
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .mach_freetype = .{ .path = "libs/mach-freetype" },
         .turbopack = .{

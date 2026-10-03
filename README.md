@@ -2,6 +2,7 @@
 A signed distance field generator with support for [Viktor Chlumský's MSDF technique](https://github.com/Chlumsky/msdfgen).
 
 ## Usage
+This project tracks the latest tagged version of Zig, which is 0.17 currently.
 A simple example can be found below, with a more in-depth one in `example/generate.zig`.
 
 ```zig

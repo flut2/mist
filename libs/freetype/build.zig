@@ -79,7 +79,33 @@ pub fn build(b: *std.Build) void {
         .file = ft_dep.path("src/base/ftmac.c"),
         .flags = &.{},
     });
+
     lib.installHeadersDirectory(ft_dep.path("include/freetype"), "freetype", .{});
     lib.installHeader(ft_dep.path("include/ft2build.h"), "ft2build.h");
+
+    const tc = b.addTranslateC(.{
+        .optimize = optimize,
+        .target = target,
+        .root_source_file = b.addWriteFiles().add("ft.h",
+            \\#include "freetype/ftadvanc.h";
+            \\#include "freetype/ftbbox.h";
+            \\#include "freetype/ftbitmap.h";
+            \\#include "freetype/ftcolor.h";
+            \\#include "freetype/ftlcdfil.h";
+            \\#include "freetype/ftsizes.h";
+            \\#include "freetype/ftstroke.h";
+            \\#include "freetype/fttrigon.h";
+            \\#include "freetype/ftsynth.h";
+            \\#include "freetype/ftmm.h";
+        ),
+    });
+    tc.addIncludePath(ft_dep.path("include"));
+
+    const mod = b.addModule("ft-c", .{
+        .root_source_file = tc.getOutput(),
+        .link_libc = true,
+    });
+    mod.linkLibrary(lib);
+
     b.installArtifact(lib);
 }
