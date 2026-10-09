@@ -576,3 +576,92 @@ fn generate(
 pub fn f64i(int: anytype) f64 {
     return @floatFromInt(int);
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}
+
+test "generateSingle triangle" {
+    const allocator = std.testing.allocator;
+
+    var shape: Shape = .{};
+    defer shape.deinit(allocator);
+
+    var sink: ShapeSink = .{ .allocator = allocator, .shape = &shape, .scale = 1.0 };
+    try sink.moveTo(.{ 0.1, 0.1 });
+    try sink.lineTo(.{ 0.9, 0.1 });
+    try sink.lineTo(.{ 0.5, 0.9 });
+    try sink.lineTo(.{ 0.1, 0.1 });
+    sink.close();
+
+    const opts: Options = .{
+        .sdf_type = .mtsdf,
+        .px_size = 64,
+        .px_range = 8,
+        .validate_shape = true,
+        .normalize_shape = true,
+        .orient_contours = true,
+        .error_correction_opts = .{},
+    };
+    const glyph = try generateSingle(allocator, &shape, .{
+        .advance = 0.8,
+        .bearing_x = 0.1,
+        .bearing_y = 0.9,
+    }, &opts);
+    defer glyph.deinit(allocator);
+
+    try std.testing.expect(glyph.metrics.width > 16);
+    try std.testing.expect(glyph.metrics.height > 16);
+    try std.testing.expectEqual(
+        @as(usize, glyph.metrics.width) * glyph.metrics.height * SdfType.mtsdf.numChannels(),
+        glyph.pixels.len,
+    );
+    try std.testing.expectEqual(@as(f64, 0.8), glyph.metrics.advance);
+    try std.testing.expectEqual(@as(f64, 0.1), glyph.metrics.bearing_x);
+    try std.testing.expectEqual(@as(f64, 0.9), glyph.metrics.bearing_y);
+
+    // px_range in em units, matching what generateSingle feeds the pipeline
+    // (8px at 64px per em); the winding is normalized by now, so distances
+    // are positive inside.
+    const inside = findDistanceAt(.sdf, shape, .{ 0.5, 0.4 }, 8.0 / 64.0);
+    try std.testing.expect(inside > 0.5);
+    const outside = findDistanceAt(.sdf, shape, .{ -1.0, -1.0 }, 8.0 / 64.0);
+    try std.testing.expect(outside < 0.5);
+
+    var max_px: u8 = 0;
+    for (glyph.pixels) |px| max_px = @max(max_px, px);
+    try std.testing.expect(max_px > 200);
+}
+
+test "generateSingle empty shape" {
+    const allocator = std.testing.allocator;
+    const opts: Options = .{ .sdf_type = .sdf, .px_size = 64, .px_range = 8 };
+
+    var shape: Shape = .{};
+    defer shape.deinit(allocator);
+    const glyph = try generateSingle(allocator, &shape, .{
+        .advance = 0.3,
+        .bearing_x = 0.0,
+        .bearing_y = 0.0,
+    }, &opts);
+    defer glyph.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 0), glyph.metrics.width);
+    try std.testing.expectEqual(@as(u16, 0), glyph.metrics.height);
+    try std.testing.expectEqual(@as(f64, 0.3), glyph.metrics.advance);
+    try std.testing.expectEqual(@as(usize, 0), glyph.pixels.len);
+
+    // A phantom empty contour, as whitespace glyph outlines tend to have.
+    var shape2: Shape = .{};
+    defer shape2.deinit(allocator);
+    var sink: ShapeSink = .{ .allocator = allocator, .shape = &shape2, .scale = 1.0 };
+    try sink.moveTo(.{ 1.0, 1.0 });
+    sink.close();
+    const glyph2 = try generateSingle(allocator, &shape2, .{
+        .advance = 0.0,
+        .bearing_x = 0.0,
+        .bearing_y = 0.0,
+    }, &opts);
+    defer glyph2.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 0), glyph2.metrics.width);
+    try std.testing.expectEqual(@as(usize, 0), glyph2.pixels.len);
+}
