@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const EdgeSegment = @import("EdgeSegment.zig");
-const f64i = @import("Generator.zig").f64i;
+const f64i = @import("core.zig").f64i;
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
 

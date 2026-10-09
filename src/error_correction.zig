@@ -2,8 +2,8 @@ const std = @import("std");
 
 const Bitmap = @import("bitmap.zig").Bitmap;
 const EdgeSegment = @import("EdgeSegment.zig");
-const f64i = @import("Generator.zig").f64i;
-const findDistanceAt = @import("Generator.zig").findDistanceAt;
+const f64i = @import("core.zig").f64i;
+const findDistanceAt = @import("core.zig").findDistanceAt;
 const math = @import("math.zig");
 const median = math.median;
 const Shape = @import("Shape.zig");
