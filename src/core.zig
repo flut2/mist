@@ -132,9 +132,100 @@ pub const Msdf10Pixel = packed struct(u32) {
     a: u2 = std.math.maxInt(u2),
 };
 
-/// Renders a shape into an SDF pixel buffer. Exposed for the freetype front
-/// end until `generateSingle()` takes over as the only caller.
-pub fn getSdfPixels(
+/// Font-agnostic glyph placement: the advance and bearings of the glyph the
+/// shape was taken from, in em units, as reported by whatever produced the
+/// outline. The result's pixel `width`/`height` are computed by `generateSingle`.
+pub const GlyphPlacement = struct {
+    advance: f64,
+    bearing_x: f64,
+    bearing_y: f64,
+};
+
+/// Renders a shape (in em units) into an SDF pixel buffer.
+///
+/// `shape` is mutated in place: empty contours are dropped, and depending on
+/// `opts` the contours may get reoriented or normalized. An empty shape
+/// produces a zero-size glyph. The placement's advance/bearings flow through
+/// to the result's metrics; `width`/`height` are computed from the shape.
+///
+/// The result is under the caller's ownership (call `deinit()` or deallocate fields manually)
+pub fn generateSingle(
+    allocator: std.mem.Allocator,
+    shape: *Shape,
+    placement: GlyphPlacement,
+    opts: *const Options,
+) !GeneratedGlyph {
+    if (shape.contours.items.len > 0) {
+        var contour_it = std.mem.reverseIterator(shape.contours.items);
+        var i: isize = @intCast(shape.contours.items.len - 1);
+        while (contour_it.next()) |contour| : (i -= 1)
+            if (contour.edges.items.len == 0) {
+                _ = shape.contours.swapRemove(@intCast(i));
+            };
+    }
+
+    if (shape.contours.items.len == 0)
+        return .{
+            .metrics = .{
+                .advance = placement.advance,
+                .bearing_x = placement.bearing_x,
+                .bearing_y = placement.bearing_y,
+                .width = 0,
+                .height = 0,
+            },
+            .pixels = &.{},
+        };
+
+    if (opts.validate_shape and !shape.validate()) return error.InvalidShape;
+    if (opts.orient_contours) try shape.orientContours(allocator);
+    if (opts.normalize_shape) try shape.normalize(allocator);
+
+    const px_size = f64i(opts.px_size);
+    const px_range = f64i(opts.px_range) / px_size;
+
+    var bounds = shape.calcBounds();
+    if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
+        bounds = .whole_frame;
+
+    const bound_w = bounds.right - bounds.left;
+    const bound_h = bounds.top - bounds.bottom;
+    const w: u16 = @trunc((bound_w + px_range) * px_size);
+    const h: u16 = @trunc((bound_h + px_range) * px_size);
+
+    if (opts.winding == .negative or
+        opts.winding == .guess and findDistanceAt(
+            .sdf,
+            shape.*,
+            .{
+                bounds.left - px_range - bound_w - 1.0,
+                bounds.bottom - px_range - bound_h - 1.0,
+            },
+            px_range,
+        ) > 0) for (shape.contours.items) |*contour| contour.reverse();
+
+    return .{
+        .metrics = .{
+            .advance = placement.advance,
+            .bearing_x = placement.bearing_x,
+            .bearing_y = placement.bearing_y,
+            .width = w,
+            .height = h,
+        },
+        .pixels = try getSdfPixels(
+            allocator,
+            opts,
+            w,
+            h,
+            shape,
+            .{
+                bounds.left - px_range / 2.0,
+                bounds.bottom - px_range / 2.0,
+            },
+        ),
+    };
+}
+
+fn getSdfPixels(
     allocator: std.mem.Allocator,
     opts: *const Options,
     w: u16,

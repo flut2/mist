@@ -1,12 +1,11 @@
 const std = @import("std");
 
-const core = @import("core.zig");
+const core = @import("mist-core");
 const ft = @import("mach-freetype");
 const pack = @import("turbopack");
 
-const math = @import("math.zig");
-
-const Shape = @import("Shape.zig");
+const Shape = core.Shape;
+const math = core.math;
 
 const Vec2 = @Vector(2, f64);
 
@@ -176,72 +175,16 @@ pub fn generateSingle(
     ));
 
     const metrics = face.glyph().metrics();
-    if (shape.contours.items.len == 0)
-        return .{
-            .metrics = .{
-                .advance = scale * f64i(face.glyph().advance().x),
-                .bearing_x = scale * f64i(metrics.horiBearingX),
-                .bearing_y = scale * f64i(metrics.horiBearingY),
-                .width = 0,
-                .height = 0,
-            },
-            .pixels = &.{},
-        };
-
-    var contour_it = std.mem.reverseIterator(shape.contours.items);
-    var i: isize = @intCast(shape.contours.items.len - 1);
-    while (contour_it.next()) |contour| : (i -= 1)
-        if (contour.edges.items.len == 0) {
-            _ = shape.contours.swapRemove(@intCast(i));
-        };
-
-    if (opts.validate_shape and !shape.validate()) return error.InvalidShape;
-    if (opts.orient_contours) try shape.orientContours(allocator);
-    if (opts.normalize_shape) try shape.normalize(allocator);
-
-    const px_size = f64i(opts.px_size);
-    const px_range = f64i(opts.px_range) / px_size;
-
-    var bounds = shape.calcBounds();
-    if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
-        bounds = .whole_frame;
-
-    const bound_w = bounds.right - bounds.left;
-    const bound_h = bounds.top - bounds.bottom;
-    const w: u16 = @trunc((bound_w + px_range) * px_size);
-    const h: u16 = @trunc((bound_h + px_range) * px_size);
-
-    if (opts.winding == .negative or
-        opts.winding == .guess and findDistanceAt(
-            .sdf,
-            shape,
-            .{
-                bounds.left - px_range - bound_w - 1.0,
-                bounds.bottom - px_range - bound_h - 1.0,
-            },
-            px_range,
-        ) > 0) for (shape.contours.items) |*contour| contour.reverse();
-
-    return .{
-        .metrics = .{
+    return core.generateSingle(
+        allocator,
+        &shape,
+        .{
             .advance = scale * f64i(face.glyph().advance().x),
             .bearing_x = scale * f64i(metrics.horiBearingX),
             .bearing_y = scale * f64i(metrics.horiBearingY),
-            .width = w,
-            .height = h,
         },
-        .pixels = try core.getSdfPixels(
-            allocator,
-            opts,
-            w,
-            h,
-            &shape,
-            .{
-                bounds.left - px_range / 2.0,
-                bounds.bottom - px_range / 2.0,
-            },
-        ),
-    };
+        opts,
+    );
 }
 
 /// The result is under the caller's ownership (call `deinit()` or deallocate fields manually)
