@@ -141,6 +141,76 @@ pub const GlyphPlacement = struct {
     bearing_y: f64,
 };
 
+/// Font-agnostic outline ingestion: feed one glyph's contours through the
+/// methods in outline order, starting with `moveTo`, then hand the shape to
+/// `generateSingle`. Incoming coordinates are multiplied by `scale`, so raw
+/// font units can be pushed directly with `scale` set to 1/units_per_em.
+/// Zero-length lines/curves are dropped, matching what the freetype front end does.
+pub const ShapeSink = struct {
+    allocator: std.mem.Allocator,
+    shape: *Shape,
+    scale: f64,
+    pos: Vec2 = @splat(0.0),
+    contour: ?*Shape.Contour = null,
+
+    fn scaled(p: Vec2, scale: f64) Vec2 {
+        return p * @as(Vec2, @splat(scale));
+    }
+
+    pub fn moveTo(self: *ShapeSink, to: Vec2) !void {
+        if (self.contour == null or self.contour.?.edges.items.len != 0) {
+            self.contour = self.shape.contours.addOne(self.allocator) catch return error.OutOfMemory;
+            self.contour.?.* = .{};
+        }
+        self.pos = scaled(to, self.scale);
+    }
+
+    pub fn lineTo(self: *ShapeSink, to: Vec2) !void {
+        const endpoint = scaled(to, self.scale);
+        if (!std.meta.eql(endpoint, self.pos)) {
+            self.contour.?.edges.append(
+                self.allocator,
+                .create(self.pos, endpoint, null, null, .all),
+            ) catch return error.OutOfMemory;
+            self.pos = endpoint;
+        }
+    }
+
+    pub fn quadTo(self: *ShapeSink, control: Vec2, to: Vec2) !void {
+        const endpoint = scaled(to, self.scale);
+        if (!std.meta.eql(endpoint, self.pos)) {
+            self.contour.?.edges.append(self.allocator, .create(
+                self.pos,
+                scaled(control, self.scale),
+                endpoint,
+                null,
+                .all,
+            )) catch return error.OutOfMemory;
+            self.pos = endpoint;
+        }
+    }
+
+    pub fn cubicTo(self: *ShapeSink, control_1: Vec2, control_2: Vec2, to: Vec2) !void {
+        const endpoint = scaled(to, self.scale);
+        const c1 = scaled(control_1, self.scale);
+        const c2 = scaled(control_2, self.scale);
+        if (!std.meta.eql(endpoint, self.pos) or math.cross(c1 - endpoint, c2 - endpoint) != 0.0) {
+            self.contour.?.edges.append(
+                self.allocator,
+                .create(self.pos, c1, c2, endpoint, .all),
+            ) catch return error.OutOfMemory;
+            self.pos = endpoint;
+        }
+    }
+
+    /// Ends the current contour. Only observable right after a `moveTo`:
+    /// the next `moveTo` then starts a fresh contour instead of reusing the
+    /// still-empty one.
+    pub fn close(self: *ShapeSink) void {
+        self.contour = null;
+    }
+};
+
 /// Renders a shape (in em units) into an SDF pixel buffer.
 ///
 /// `shape` is mutated in place: empty contours are dropped, and depending on

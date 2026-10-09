@@ -5,7 +5,6 @@ const ft = @import("mach-freetype");
 const pack = @import("turbopack");
 
 const Shape = core.Shape;
-const math = core.math;
 
 const Vec2 = @Vector(2, f64);
 
@@ -68,11 +67,7 @@ pub const Options = core.Options;
 pub const Msdf10Pixel = core.Msdf10Pixel;
 
 const FreetypeContext = struct {
-    allocator: std.mem.Allocator,
-    scale: f64,
-    shape: *Shape,
-    pos: Vec2 = @splat(0.0),
-    contour: ?*Shape.Contour = null,
+    sink: core.ShapeSink,
 };
 
 library: ft.Library,
@@ -155,9 +150,11 @@ pub fn generateSingle(
     defer shape.deinit(allocator);
 
     var context: FreetypeContext = .{
-        .allocator = allocator,
-        .scale = scale,
-        .shape = &shape,
+        .sink = .{
+            .allocator = allocator,
+            .shape = &shape,
+            .scale = scale,
+        },
     };
 
     const outline = face.glyph().outline().?;
@@ -404,49 +401,25 @@ fn processAtlasCodepointInner(
 
 pub const findDistanceAt = core.findDistanceAt;
 
-fn scaledFtVec(vec: [*c]const ft.Vector, scale: f64) Vec2 {
-    return .{
-        f64i(vec.*.x) * scale,
-        f64i(vec.*.y) * scale,
-    };
+fn ftVec(vec: [*c]const ft.Vector) Vec2 {
+    return .{ f64i(vec.*.x), f64i(vec.*.y) };
 }
 
 fn ftMoveTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
-    var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    if (context.contour == null or context.contour.?.edges.items.len != 0) {
-        context.contour = context.shape.contours.addOne(context.allocator) catch return ft.c.FT_Err_Out_Of_Memory;
-        context.contour.?.* = .{};
-    }
-    context.pos = scaledFtVec(to, context.scale);
+    const context: *FreetypeContext = @ptrCast(@alignCast(ud));
+    context.sink.moveTo(ftVec(to)) catch return ft.c.FT_Err_Out_Of_Memory;
     return 0;
 }
 
 fn ftLineTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
-    var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = scaledFtVec(to, context.scale);
-    if (!std.meta.eql(endpoint, context.pos)) {
-        context.contour.?.edges.append(
-            context.allocator,
-            .create(context.pos, endpoint, null, null, .all),
-        ) catch return ft.c.FT_Err_Out_Of_Memory;
-        context.pos = endpoint;
-    }
+    const context: *FreetypeContext = @ptrCast(@alignCast(ud));
+    context.sink.lineTo(ftVec(to)) catch return ft.c.FT_Err_Out_Of_Memory;
     return 0;
 }
 
 fn ftConicTo(control: [*c]const ft.Vector, to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
-    var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = scaledFtVec(to, context.scale);
-    if (!std.meta.eql(endpoint, context.pos)) {
-        context.contour.?.edges.append(context.allocator, .create(
-            context.pos,
-            scaledFtVec(control, context.scale),
-            endpoint,
-            null,
-            .all,
-        )) catch return ft.c.FT_Err_Out_Of_Memory;
-        context.pos = endpoint;
-    }
+    const context: *FreetypeContext = @ptrCast(@alignCast(ud));
+    context.sink.quadTo(ftVec(control), ftVec(to)) catch return ft.c.FT_Err_Out_Of_Memory;
     return 0;
 }
 
@@ -456,17 +429,8 @@ fn ftCubicTo(
     to: [*c]const ft.Vector,
     ud: ?*anyopaque,
 ) callconv(.c) i32 {
-    var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = scaledFtVec(to, context.scale);
-    const scaled_c1: Vec2 = scaledFtVec(control_1, context.scale);
-    const scaled_c2: Vec2 = scaledFtVec(control_2, context.scale);
-    if (!std.meta.eql(endpoint, context.pos) or math.cross(scaled_c1 - endpoint, scaled_c2 - endpoint) != 0.0) {
-        context.contour.?.edges.append(
-            context.allocator,
-            .create(context.pos, scaled_c1, scaled_c2, endpoint, .all),
-        ) catch return ft.c.FT_Err_Out_Of_Memory;
-        context.pos = endpoint;
-    }
+    const context: *FreetypeContext = @ptrCast(@alignCast(ud));
+    context.sink.cubicTo(ftVec(control_1), ftVec(control_2), ftVec(to)) catch return ft.c.FT_Err_Out_Of_Memory;
     return 0;
 }
 
