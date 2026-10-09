@@ -5,7 +5,6 @@ const ft = @import("mach-freetype");
 const pack = @import("turbopack");
 
 const Bitmap = @import("bitmap.zig").Bitmap;
-const coloring = @import("coloring.zig");
 const error_correction = @import("error_correction.zig");
 const math = @import("math.zig");
 const Scanline = @import("Scanline.zig");
@@ -23,13 +22,7 @@ pub const FontMetrics = struct {
     underline_thickness: f64,
 };
 
-pub const GlyphMetrics = struct {
-    advance: f64,
-    bearing_x: f64,
-    bearing_y: f64,
-    width: u16,
-    height: u16,
-};
+pub const GlyphMetrics = core.GlyphMetrics;
 
 pub const KerningPair = struct {
     codepoint_1: u21,
@@ -38,14 +31,7 @@ pub const KerningPair = struct {
     y: f64,
 };
 
-pub const GeneratedGlyph = struct {
-    metrics: GlyphMetrics,
-    pixels: []const u8,
-
-    pub fn deinit(self: GeneratedGlyph, allocator: std.mem.Allocator) void {
-        allocator.free(self.pixels);
-    }
-};
+pub const GeneratedGlyph = core.GeneratedGlyph;
 
 pub const GeneratedAtlasGlyph = struct {
     metrics: GlyphMetrics,
@@ -69,76 +55,20 @@ pub const GeneratedAtlas = struct {
     }
 };
 
+// The SDF generation types and pipeline live in the dependency-free
+// `mist-core` module (see `core.zig`); they're re-exported here
+// so the `mist` module's public API is unchanged.
 pub const SdfType = core.SdfType;
 
-pub const ColoringMethod = enum {
-    simple,
-    /// Only for use with ink trap fonts, as the coloring remains correct
-    /// after removing the edges required for trapping ink.
-    ink_trap,
-    /// Performs the coloring based on edge distances.
-    /// Somewhat slower than other methods, but it produces a better result most of the time.
-    distance,
+pub const ColoringMethod = core.ColoringMethod;
 
-    pub fn execute(self: ColoringMethod, args: anytype) !void {
-        try switch (self) {
-            .simple => @call(.auto, coloring.colorSimple, args),
-            .ink_trap => @call(.auto, coloring.colorInkTrap, args),
-            .distance => @call(.auto, coloring.colorDistance, args),
-        };
-    }
-};
+pub const Winding = core.Winding;
 
-pub const Winding = enum {
-    /// Attempts to figure out winding on its own, by checking
-    /// the polarity of an OOB point's distance.
-    guess,
-    positive,
-    negative,
-};
+pub const VarFontArgument = core.VarFontArgument;
 
-pub const VarFontArgument = struct {
-    name: []const u8,
-    value: f64,
-};
+pub const Options = core.Options;
 
-pub const Options = struct {
-    sdf_type: SdfType,
-    px_size: u16,
-    px_range: u16,
-    /// Has no effect if `sdf_type.requiresColoring()` is false.
-    coloring_rng_seed: u64 = 0,
-    /// The method with which to perform the MSDF 3-coloring.
-    /// While the implementations are based on msdfgen, they're (intentionally)
-    /// not equivalent, but should resolve corners similarly well.
-    ///
-    /// Has no effect if `sdf_type.requiresColoring()` is false.
-    coloring_method: ColoringMethod = .distance,
-    /// The angle which is considered to be a corner, in radians.
-    corner_angle_threshold: f64 = 3.0,
-    winding: Winding = .guess,
-    /// Validates that the given (or generated) shapes' contours form a
-    /// closed loop, with each edge connecting to each other properly.
-    validate_shape: bool = false,
-    normalize_shape: bool = false,
-    orient_contours: bool = false,
-    /// Requires `orient_contours` to be disabled.
-    scanline_fill_rule: ?Scanline.FillRule = null,
-    /// Only MSDFs (both their normal and their 10-bit versions) and MTSDFs can be error corrected.
-    error_correction_opts: ?error_correction.Options = null,
-    /// The list of arguments to use if the given font has multiple masters.
-    var_font_args: []const VarFontArgument = &.{},
-    /// Whether to use async tasks over concurrent ones during atlas generation.
-    /// Currently has no effect outside of atlas generation.
-    disable_concurrency: bool = false,
-};
-
-pub const Msdf10Pixel = packed struct(u32) {
-    r: u10 = 0,
-    g: u10 = 0,
-    b: u10 = 0,
-    a: u2 = std.math.maxInt(u2),
-};
+pub const Msdf10Pixel = core.Msdf10Pixel;
 
 const FreetypeContext = struct {
     allocator: std.mem.Allocator,

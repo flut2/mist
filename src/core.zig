@@ -1,6 +1,8 @@
 //! Dependency-free SDF generation core.
 //! Has no dependencies, so it's usable on freestanding targets.
 
+const std = @import("std");
+
 pub const coloring = @import("coloring.zig");
 pub const error_correction = @import("error_correction.zig");
 pub const math = @import("math.zig");
@@ -11,6 +13,23 @@ pub const Shape = @import("Shape.zig");
 const EdgeColor = coloring.EdgeColor;
 
 const Vec2 = @Vector(2, f64);
+
+pub const GlyphMetrics = struct {
+    advance: f64,
+    bearing_x: f64,
+    bearing_y: f64,
+    width: u16,
+    height: u16,
+};
+
+pub const GeneratedGlyph = struct {
+    metrics: GlyphMetrics,
+    pixels: []const u8,
+
+    pub fn deinit(self: GeneratedGlyph, allocator: std.mem.Allocator) void {
+        allocator.free(self.pixels);
+    }
+};
 
 pub const SdfType = enum {
     sdf,
@@ -40,6 +59,76 @@ pub const SdfType = enum {
             else => false,
         };
     }
+};
+
+pub const ColoringMethod = enum {
+    simple,
+    /// Only for use with ink trap fonts, as the coloring remains correct
+    /// after removing the edges required for trapping ink.
+    ink_trap,
+    /// Performs the coloring based on edge distances.
+    /// Somewhat slower than other methods, but it produces a better result most of the time.
+    distance,
+
+    pub fn execute(self: ColoringMethod, args: anytype) !void {
+        try switch (self) {
+            .simple => @call(.auto, coloring.colorSimple, args),
+            .ink_trap => @call(.auto, coloring.colorInkTrap, args),
+            .distance => @call(.auto, coloring.colorDistance, args),
+        };
+    }
+};
+
+pub const Winding = enum {
+    /// Attempts to figure out winding on its own, by checking
+    /// the polarity of an OOB point's distance.
+    guess,
+    positive,
+    negative,
+};
+
+pub const VarFontArgument = struct {
+    name: []const u8,
+    value: f64,
+};
+
+pub const Options = struct {
+    sdf_type: SdfType,
+    px_size: u16,
+    px_range: u16,
+    /// Has no effect if `sdf_type.requiresColoring()` is false.
+    coloring_rng_seed: u64 = 0,
+    /// The method with which to perform the MSDF 3-coloring.
+    /// While the implementations are based on msdfgen, they're (intentionally)
+    /// not equivalent, but should resolve corners similarly well.
+    ///
+    /// Has no effect if `sdf_type.requiresColoring()` is false.
+    coloring_method: ColoringMethod = .distance,
+    /// The angle which is considered to be a corner, in radians.
+    corner_angle_threshold: f64 = 3.0,
+    winding: Winding = .guess,
+    /// Validates that the given (or generated) shapes' contours form a
+    /// closed loop, with each edge connecting to each other properly.
+    validate_shape: bool = false,
+    normalize_shape: bool = false,
+    orient_contours: bool = false,
+    /// Requires `orient_contours` to be disabled.
+    scanline_fill_rule: ?Scanline.FillRule = null,
+    /// Only MSDFs (both their normal and their 10-bit versions) and MTSDFs can be error corrected.
+    error_correction_opts: ?error_correction.Options = null,
+    /// The list of arguments to use if the given font has multiple masters.
+    /// Only used by font front ends (e.g. the freetype-based `mist` module).
+    var_font_args: []const VarFontArgument = &.{},
+    /// Whether to use async tasks over concurrent ones during atlas generation.
+    /// Currently has no effect outside of atlas generation.
+    disable_concurrency: bool = false,
+};
+
+pub const Msdf10Pixel = packed struct(u32) {
+    r: u10 = 0,
+    g: u10 = 0,
+    b: u10 = 0,
+    a: u2 = std.math.maxInt(u2),
 };
 
 fn pxRangeNorm(dist: f64, px_range: f64) f64 {
