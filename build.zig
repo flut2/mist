@@ -7,11 +7,11 @@ pub fn build(b: *std.Build) void {
     // Dependency-free SDF core; usable on any target, including freestanding
     // ones (wasm), as it neither links nor imports freetype/libc.
     const core_module = b.addModule("mist-core", .{
-        .root_source_file = b.path("src/core.zig"),
+        .root_source_file = b.path("src/mist-core/core.zig"),
     });
 
     _ = b.addModule("mist", .{
-        .root_source_file = b.path("src/Generator.zig"),
+        .root_source_file = b.path("src/mist/Generator.zig"),
         .imports = &.{
             .{ .name = "mist-core", .module = core_module },
             .{
@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
 
     const core_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/core.zig"),
+            .root_source_file = b.path("src/mist-core/core.zig"),
             .target = target,
             .optimize = optimize,
         }),
