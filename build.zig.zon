@@ -1,7 +1,7 @@
 .{
     .name = .mist,
     .fingerprint = 0xfc749f7d2126c2dd,
-    .version = "1.0.0",
+    .version = "1.1.0",
     .paths = .{
         "LICENSE",
         "libs",
