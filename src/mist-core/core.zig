@@ -1,29 +1,19 @@
+//! Dependency-free SDF generation core.
+//! Has no dependencies, so it's usable on freestanding targets.
+
 const std = @import("std");
 
-const ft = @import("mach-freetype");
-const pack = @import("turbopack");
+pub const coloring = @import("coloring.zig");
+pub const error_correction = @import("error_correction.zig");
+pub const math = @import("math.zig");
+pub const EdgeSegment = @import("EdgeSegment.zig");
+pub const Scanline = @import("Scanline.zig");
+pub const Shape = @import("Shape.zig");
 
 const Bitmap = @import("bitmap.zig").Bitmap;
-const coloring = @import("coloring.zig");
 const EdgeColor = coloring.EdgeColor;
-const EdgeSegment = @import("EdgeSegment.zig");
-const error_correction = @import("error_correction.zig");
-const math = @import("math.zig");
-const Scanline = @import("Scanline.zig");
-const Shape = @import("Shape.zig");
 
 const Vec2 = @Vector(2, f64);
-const f64_nan = std.math.nan(f64);
-
-const Generator = @This();
-
-pub const FontMetrics = struct {
-    line_height: f64,
-    ascender: f64,
-    descender: f64,
-    underline_y: f64,
-    underline_thickness: f64,
-};
 
 pub const GlyphMetrics = struct {
     advance: f64,
@@ -33,40 +23,11 @@ pub const GlyphMetrics = struct {
     height: u16,
 };
 
-pub const KerningPair = struct {
-    codepoint_1: u21,
-    codepoint_2: u21,
-    x: f64,
-    y: f64,
-};
-
 pub const GeneratedGlyph = struct {
     metrics: GlyphMetrics,
     pixels: []const u8,
 
     pub fn deinit(self: GeneratedGlyph, allocator: std.mem.Allocator) void {
-        allocator.free(self.pixels);
-    }
-};
-
-pub const GeneratedAtlasGlyph = struct {
-    metrics: GlyphMetrics,
-    codepoint: u21,
-    /// This is the glyph's unscaled, unnormalized
-    /// bounding box on the atlas, with padding included.
-    tex_bounds: pack.Rect,
-};
-
-pub const GeneratedAtlas = struct {
-    glyphs: []const GeneratedAtlasGlyph,
-    kernings: []const KerningPair,
-    /// In case of `msdf10` you should reinterpret this as a `Msdf10Pixel` slice,
-    /// like with 10-bit ABGR GPU formats (assuming a little endian host).
-    pixels: []const u8,
-
-    pub fn deinit(self: GeneratedAtlas, allocator: std.mem.Allocator) void {
-        allocator.free(self.glyphs);
-        allocator.free(self.kernings);
         allocator.free(self.pixels);
     }
 };
@@ -157,6 +118,7 @@ pub const Options = struct {
     /// Only MSDFs (both their normal and their 10-bit versions) and MTSDFs can be error corrected.
     error_correction_opts: ?error_correction.Options = null,
     /// The list of arguments to use if the given font has multiple masters.
+    /// Only used by font front ends (e.g. the freetype-based `mist` module).
     var_font_args: []const VarFontArgument = &.{},
     /// Whether to use async tasks over concurrent ones during atlas generation.
     /// Currently has no effect outside of atlas generation.
@@ -170,131 +132,118 @@ pub const Msdf10Pixel = packed struct(u32) {
     a: u2 = std.math.maxInt(u2),
 };
 
-const FreetypeContext = struct {
-    allocator: std.mem.Allocator,
-    scale: f64,
-    shape: *Shape,
-    pos: Vec2 = @splat(0.0),
-    contour: ?*Shape.Contour = null,
+/// Font-agnostic glyph placement: the advance and bearings of the glyph the
+/// shape was taken from, in em units, as reported by whatever produced the
+/// outline. The result's pixel `width`/`height` are computed by `generateSingle`.
+pub const GlyphPlacement = struct {
+    advance: f64,
+    bearing_x: f64,
+    bearing_y: f64,
 };
 
-library: ft.Library,
-font_memory: []const u8,
-
-/// `font_memory` is the raw font file data.
-/// It should be valid and available during the entire Generator lifecycle,
-/// as it's used to create new faces, since a shared one is not thread-safe.
-pub fn create(font_memory: []const u8) !Generator {
-    return .{
-        .library = try .init(),
-        .font_memory = font_memory,
-    };
-}
-
-pub fn destroy(self: *Generator) void {
-    self.library.deinit();
-}
-
-pub fn fontMetrics(self: *Generator) !FontMetrics {
-    const face = try self.library.createFaceMemory(self.font_memory, 0);
-    defer face.deinit();
-
-    const scale = 1.0 / f64i(face.unitsPerEM());
-    return .{
-        .line_height = scale * f64i(face.height()),
-        .ascender = scale * f64i(face.ascender()),
-        .descender = scale * f64i(face.descender()),
-        .underline_y = scale * f64i(face.underlinePosition()),
-        .underline_thickness = scale * f64i(face.underlineThickness()),
-    };
-}
-
-fn handleVarFont(
-    self: *Generator,
-    face: ft.Face,
+/// Font-agnostic outline ingestion: feed one glyph's contours through the
+/// methods in outline order, starting with `moveTo`, then hand the shape to
+/// `generateSingle`. Incoming coordinates are multiplied by `scale`, so raw
+/// font units can be pushed directly with `scale` set to 1/units_per_em.
+/// Zero-length lines/curves are dropped, matching what the freetype front end does.
+pub const ShapeSink = struct {
     allocator: std.mem.Allocator,
-    var_args: []const VarFontArgument,
-    face_flags: ft.FaceFlags,
-) !void {
-    if (var_args.len == 0) return;
+    shape: *Shape,
+    scale: f64,
+    pos: Vec2 = @splat(0.0),
+    contour: ?*Shape.Contour = null,
 
-    if (face_flags.multiple_masters) {
-        std.log.warn("Var font args supplied, but the face only has a single master", .{});
-        return;
+    fn scaled(p: Vec2, scale: f64) Vec2 {
+        return p * @as(Vec2, @splat(scale));
     }
 
-    const vf = try face.createVarFontInfo();
-    if (vf) |var_font| if (var_font.num_axis > 0) {
-        var coords = try allocator.alloc(ft.c.FT_Fixed, var_font.num_axis);
-        defer allocator.free(coords);
-        try face.getVarDesignCoords(coords);
-        for (var_args) |args|
-            for (var_font.axis[0..var_font.num_axis], 0..) |axis, i|
-                if (std.mem.eql(u8, std.mem.span(axis.name), args.name)) {
-                    coords[i] = @trunc(std.math.maxInt(u16) * args.value);
-                };
-        try face.setVarDesignCoords(coords);
-    };
-    try self.library.destroyVarFontInfo(vf);
-}
+    pub fn moveTo(self: *ShapeSink, to: Vec2) !void {
+        if (self.contour == null or self.contour.?.edges.items.len != 0) {
+            self.contour = self.shape.contours.addOne(self.allocator) catch return error.OutOfMemory;
+            self.contour.?.* = .{};
+        }
+        self.pos = scaled(to, self.scale);
+    }
 
+    pub fn lineTo(self: *ShapeSink, to: Vec2) !void {
+        const endpoint = scaled(to, self.scale);
+        if (!std.meta.eql(endpoint, self.pos)) {
+            self.contour.?.edges.append(
+                self.allocator,
+                .create(self.pos, endpoint, null, null, .all),
+            ) catch return error.OutOfMemory;
+            self.pos = endpoint;
+        }
+    }
+
+    pub fn quadTo(self: *ShapeSink, control: Vec2, to: Vec2) !void {
+        const endpoint = scaled(to, self.scale);
+        if (!std.meta.eql(endpoint, self.pos)) {
+            self.contour.?.edges.append(self.allocator, .create(
+                self.pos,
+                scaled(control, self.scale),
+                endpoint,
+                null,
+                .all,
+            )) catch return error.OutOfMemory;
+            self.pos = endpoint;
+        }
+    }
+
+    pub fn cubicTo(self: *ShapeSink, control_1: Vec2, control_2: Vec2, to: Vec2) !void {
+        const endpoint = scaled(to, self.scale);
+        const c1 = scaled(control_1, self.scale);
+        const c2 = scaled(control_2, self.scale);
+        if (!std.meta.eql(endpoint, self.pos) or math.cross(c1 - endpoint, c2 - endpoint) != 0.0) {
+            self.contour.?.edges.append(
+                self.allocator,
+                .create(self.pos, c1, c2, endpoint, .all),
+            ) catch return error.OutOfMemory;
+            self.pos = endpoint;
+        }
+    }
+
+    /// Ends the current contour. Only observable right after a `moveTo`:
+    /// the next `moveTo` then starts a fresh contour instead of reusing the
+    /// still-empty one.
+    pub fn close(self: *ShapeSink) void {
+        self.contour = null;
+    }
+};
+
+/// Renders a shape (in em units) into an SDF pixel buffer.
+///
+/// `shape` is mutated in place: empty contours are dropped, and depending on
+/// `opts` the contours may get reoriented or normalized. An empty shape
+/// produces a zero-size glyph. The placement's advance/bearings flow through
+/// to the result's metrics; `width`/`height` are computed from the shape.
+///
 /// The result is under the caller's ownership (call `deinit()` or deallocate fields manually)
 pub fn generateSingle(
-    self: *Generator,
     allocator: std.mem.Allocator,
-    codepoint: u21,
+    shape: *Shape,
+    placement: GlyphPlacement,
     opts: *const Options,
 ) !GeneratedGlyph {
-    const face = try self.library.createFaceMemory(self.font_memory, 0);
-    defer face.deinit();
+    if (shape.contours.items.len > 0) {
+        var contour_it = std.mem.reverseIterator(shape.contours.items);
+        var i: isize = @intCast(shape.contours.items.len - 1);
+        while (contour_it.next()) |contour| : (i -= 1)
+            if (contour.edges.items.len == 0) {
+                _ = shape.contours.swapRemove(@intCast(i));
+            };
+    }
 
-    try self.handleVarFont(face, allocator, opts.var_font_args, face.faceFlags());
-
-    const scale = 1.0 / f64i(face.unitsPerEM());
-    const glyph_index = face.getCharIndex(codepoint) orelse return error.InvalidCodepoint;
-    try face.loadGlyph(glyph_index, .{ .no_scale = true, .no_bitmap = true });
-
-    var shape: Shape = .{};
-    defer shape.deinit(allocator);
-
-    var context: FreetypeContext = .{
-        .allocator = allocator,
-        .scale = scale,
-        .shape = &shape,
-    };
-
-    const outline = face.glyph().outline().?;
-    try ft.intToError(ft.c.FT_Outline_Decompose(
-        outline.handle,
-        &.{
-            .move_to = ftMoveTo,
-            .line_to = ftLineTo,
-            .conic_to = ftConicTo,
-            .cubic_to = ftCubicTo,
-            .shift = 0,
-            .delta = 0,
-        },
-        &context,
-    ));
-
-    const metrics = face.glyph().metrics();
     if (shape.contours.items.len == 0)
         return .{
             .metrics = .{
-                .advance = scale * f64i(face.glyph().advance().x),
-                .bearing_x = scale * f64i(metrics.horiBearingX),
-                .bearing_y = scale * f64i(metrics.horiBearingY),
+                .advance = placement.advance,
+                .bearing_x = placement.bearing_x,
+                .bearing_y = placement.bearing_y,
                 .width = 0,
                 .height = 0,
             },
             .pixels = &.{},
-        };
-
-    var contour_it = std.mem.reverseIterator(shape.contours.items);
-    var i: isize = @intCast(shape.contours.items.len - 1);
-    while (contour_it.next()) |contour| : (i -= 1)
-        if (contour.edges.items.len == 0) {
-            _ = shape.contours.swapRemove(@intCast(i));
         };
 
     if (opts.validate_shape and !shape.validate()) return error.InvalidShape;
@@ -316,7 +265,7 @@ pub fn generateSingle(
     if (opts.winding == .negative or
         opts.winding == .guess and findDistanceAt(
             .sdf,
-            shape,
+            shape.*,
             .{
                 bounds.left - px_range - bound_w - 1.0,
                 bounds.bottom - px_range - bound_h - 1.0,
@@ -326,9 +275,9 @@ pub fn generateSingle(
 
     return .{
         .metrics = .{
-            .advance = scale * f64i(face.glyph().advance().x),
-            .bearing_x = scale * f64i(metrics.horiBearingX),
-            .bearing_y = scale * f64i(metrics.horiBearingY),
+            .advance = placement.advance,
+            .bearing_x = placement.bearing_x,
+            .bearing_y = placement.bearing_y,
             .width = w,
             .height = h,
         },
@@ -337,227 +286,12 @@ pub fn generateSingle(
             opts,
             w,
             h,
-            &shape,
+            shape,
             .{
                 bounds.left - px_range / 2.0,
                 bounds.bottom - px_range / 2.0,
             },
         ),
-    };
-}
-
-/// The result is under the caller's ownership (call `deinit()` or deallocate fields manually)
-pub fn generateAtlas(
-    self: *Generator,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    codepoints: []const u21,
-    atlas_w: u16,
-    atlas_h: u16,
-    glyph_padding: u8,
-    use_kerning: bool,
-    opts: *const Options,
-) !GeneratedAtlas {
-    const glyphs = try allocator.alloc(GeneratedAtlasGlyph, codepoints.len);
-    errdefer allocator.free(glyphs);
-
-    var kernings: std.ArrayList(KerningPair) = .empty;
-    errdefer kernings.deinit(allocator);
-    kerning: {
-        if (!use_kerning)
-            break :kerning;
-
-        const face = try self.library.createFaceMemory(self.font_memory, 0);
-        defer face.deinit();
-
-        if (!face.faceFlags().kerning) {
-            std.log.warn(
-                \\Kerning requested, but none were found in the font file.
-                \\Note: FreeType doesn't have full support for GPOS kerning, you might want to populate the kern table off of the GPOS one with a font editor if you were expecting kerning to be present.
-            , .{});
-            break :kerning;
-        }
-
-        const scale = 1.0 / f64i(face.unitsPerEM());
-        for (codepoints) |codepoint_a| for (codepoints) |codepoint_b| {
-            const idx_a = face.getCharIndex(codepoint_a) orelse return error.InvalidCodepoint;
-            const idx_b = face.getCharIndex(codepoint_b) orelse return error.InvalidCodepoint;
-            if (idx_a != idx_b) {
-                const kern = try face.getKerning(idx_a, idx_b, .unscaled);
-                if (kern.x != 0 or kern.y != 0)
-                    try kernings.append(allocator, .{
-                        .codepoint_1 = codepoint_a,
-                        .codepoint_2 = codepoint_b,
-                        .x = scale * f64i(kern.x),
-                        .y = scale * f64i(kern.y),
-                    });
-            }
-        };
-    }
-
-    const id_rects = try allocator.alloc(pack.IdRect, codepoints.len);
-    defer allocator.free(id_rects);
-
-    const rect_pixels = try allocator.alloc([]const u8, codepoints.len);
-    defer {
-        for (rect_pixels) |px| allocator.free(px);
-        allocator.free(rect_pixels);
-    }
-    @memset(rect_pixels, &.{});
-
-    var process_group: std.Io.Group = .init;
-    for (
-        codepoints,
-        glyphs,
-        id_rects,
-        rect_pixels,
-        0..,
-    ) |codepoint, *glyph, *id_rect, *rect_px, i| {
-        id_rect.id = @intCast(i);
-        const args = .{
-            self,
-            allocator,
-            opts,
-            codepoint,
-            glyph,
-            id_rect,
-            rect_px,
-            glyph_padding,
-        };
-
-        if (opts.disable_concurrency)
-            process_group.async(io, processAtlasCodepoint, args)
-        else
-            try process_group.concurrent(io, processAtlasCodepoint, args);
-    }
-    try process_group.await(io);
-
-    var pack_ctx: pack.Context = try .create(allocator, atlas_w, atlas_h, .{});
-    defer pack_ctx.deinit();
-    try pack.pack(
-        pack.IdRect,
-        &pack_ctx,
-        id_rects,
-        .{ .sortLessThanFn = struct {
-            fn lessThan(_: void, a: pack.IdRect, b: pack.IdRect) bool {
-                return @max(a.rect.w, a.rect.h) > @max(b.rect.w, b.rect.h);
-            }
-        }.lessThan },
-    );
-
-    const mod_channels = if (opts.sdf_type == .msdf10)
-        4
-    else
-        opts.sdf_type.numChannels();
-    const pixels = try allocator.alloc(u8, @as(usize, atlas_w) * @as(usize, atlas_h) * @as(usize, mod_channels));
-    errdefer allocator.free(pixels);
-    @memset(pixels, 0);
-
-    for (id_rects) |id_rect| {
-        const index: usize = @intCast(id_rect.id);
-        const rect = id_rect.rect;
-        glyphs[index].tex_bounds = rect;
-        if (rect.w <= 0 or rect.h <= 0)
-            continue;
-
-        const glyph_w: usize = @intCast(rect.w - glyph_padding * 2);
-        const glyph_h: usize = @intCast(rect.h - glyph_padding * 2);
-        const cur_atlas_x: usize = @intCast(rect.x + glyph_padding);
-        const cur_atlas_y: usize = @intCast(rect.y + glyph_padding);
-
-        for (0..glyph_h) |j| {
-            const atlas_idx = ((cur_atlas_y + j) * atlas_w + cur_atlas_x) * mod_channels;
-            const src_idx = (j * glyph_w) * mod_channels;
-            @memcpy(
-                pixels[atlas_idx .. atlas_idx + glyph_w * mod_channels],
-                rect_pixels[index][src_idx .. src_idx + glyph_w * mod_channels],
-            );
-        }
-    }
-
-    return .{
-        .glyphs = glyphs,
-        .pixels = pixels,
-        .kernings = if (use_kerning and kernings.items.len > 0)
-            try kernings.toOwnedSlice(allocator)
-        else
-            &.{},
-    };
-}
-
-fn processAtlasCodepoint(
-    self: *Generator,
-    allocator: std.mem.Allocator,
-    opts: *const Options,
-    codepoint: u21,
-    glyph: *GeneratedAtlasGlyph,
-    id_rect: *pack.IdRect,
-    rect_px: *[]const u8,
-    padding: u8,
-) std.Io.Cancelable!void {
-    self.processAtlasCodepointInner(
-        allocator,
-        opts,
-        glyph,
-        id_rect,
-        rect_px,
-        padding,
-        codepoint,
-    ) catch {
-        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
-        return std.Io.Cancelable.Canceled;
-    };
-}
-
-fn processAtlasCodepointInner(
-    self: *Generator,
-    allocator: std.mem.Allocator,
-    opts: *const Options,
-    glyph: *GeneratedAtlasGlyph,
-    id_rect: *pack.IdRect,
-    rect_px: *[]const u8,
-    padding: u8,
-    codepoint: u21,
-) !void {
-    const single_glyph = try self.generateSingle(allocator, codepoint, opts);
-    const glyph_w = single_glyph.metrics.width;
-    const glyph_h = single_glyph.metrics.height;
-    if (glyph_w == 0 or glyph_h == 0) {
-        glyph.* = .{
-            .metrics = .{
-                .advance = single_glyph.metrics.advance,
-                .bearing_x = single_glyph.metrics.bearing_x,
-                .bearing_y = single_glyph.metrics.bearing_y,
-                .width = 0.0,
-                .height = 0.0,
-            },
-            .codepoint = codepoint,
-            .tex_bounds = .{ .w = 0, .h = 0 },
-        };
-        id_rect.rect = .{ .w = 0, .h = 0 };
-        return;
-    }
-
-    rect_px.* = single_glyph.pixels;
-    id_rect.rect = .{
-        .w = glyph_w + padding * 2,
-        .h = glyph_h + padding * 2,
-    };
-    glyph.* = .{
-        .metrics = .{
-            .advance = single_glyph.metrics.advance,
-            .bearing_x = single_glyph.metrics.bearing_x,
-            .bearing_y = single_glyph.metrics.bearing_y,
-            .width = @intCast(id_rect.rect.w),
-            .height = @intCast(id_rect.rect.h),
-        },
-        .codepoint = codepoint,
-        .tex_bounds = .{
-            .x = std.math.minInt(i32),
-            .y = std.math.minInt(i32),
-            .w = std.math.minInt(i32),
-            .h = std.math.minInt(i32),
-        },
     };
 }
 
@@ -839,72 +573,95 @@ fn generate(
     };
 }
 
-fn scaledFtVec(vec: [*c]const ft.Vector, scale: f64) Vec2 {
-    return .{
-        f64i(vec.*.x) * scale,
-        f64i(vec.*.y) * scale,
-    };
-}
-
-fn ftMoveTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
-    var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    if (context.contour == null or context.contour.?.edges.items.len != 0) {
-        context.contour = context.shape.contours.addOne(context.allocator) catch return ft.c.FT_Err_Out_Of_Memory;
-        context.contour.?.* = .{};
-    }
-    context.pos = scaledFtVec(to, context.scale);
-    return 0;
-}
-
-fn ftLineTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
-    var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = scaledFtVec(to, context.scale);
-    if (!std.meta.eql(endpoint, context.pos)) {
-        context.contour.?.edges.append(
-            context.allocator,
-            .create(context.pos, endpoint, null, null, .all),
-        ) catch return ft.c.FT_Err_Out_Of_Memory;
-        context.pos = endpoint;
-    }
-    return 0;
-}
-
-fn ftConicTo(control: [*c]const ft.Vector, to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
-    var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = scaledFtVec(to, context.scale);
-    if (!std.meta.eql(endpoint, context.pos)) {
-        context.contour.?.edges.append(context.allocator, .create(
-            context.pos,
-            scaledFtVec(control, context.scale),
-            endpoint,
-            null,
-            .all,
-        )) catch return ft.c.FT_Err_Out_Of_Memory;
-        context.pos = endpoint;
-    }
-    return 0;
-}
-
-fn ftCubicTo(
-    control_1: [*c]const ft.Vector,
-    control_2: [*c]const ft.Vector,
-    to: [*c]const ft.Vector,
-    ud: ?*anyopaque,
-) callconv(.c) i32 {
-    var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = scaledFtVec(to, context.scale);
-    const scaled_c1: Vec2 = scaledFtVec(control_1, context.scale);
-    const scaled_c2: Vec2 = scaledFtVec(control_2, context.scale);
-    if (!std.meta.eql(endpoint, context.pos) or math.cross(scaled_c1 - endpoint, scaled_c2 - endpoint) != 0.0) {
-        context.contour.?.edges.append(
-            context.allocator,
-            .create(context.pos, scaled_c1, scaled_c2, endpoint, .all),
-        ) catch return ft.c.FT_Err_Out_Of_Memory;
-        context.pos = endpoint;
-    }
-    return 0;
-}
-
 pub fn f64i(int: anytype) f64 {
     return @floatFromInt(int);
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}
+
+test "generateSingle triangle" {
+    const allocator = std.testing.allocator;
+
+    var shape: Shape = .{};
+    defer shape.deinit(allocator);
+
+    var sink: ShapeSink = .{ .allocator = allocator, .shape = &shape, .scale = 1.0 };
+    try sink.moveTo(.{ 0.1, 0.1 });
+    try sink.lineTo(.{ 0.9, 0.1 });
+    try sink.lineTo(.{ 0.5, 0.9 });
+    try sink.lineTo(.{ 0.1, 0.1 });
+    sink.close();
+
+    const opts: Options = .{
+        .sdf_type = .mtsdf,
+        .px_size = 64,
+        .px_range = 8,
+        .validate_shape = true,
+        .normalize_shape = true,
+        .orient_contours = true,
+        .error_correction_opts = .{},
+    };
+    const glyph = try generateSingle(allocator, &shape, .{
+        .advance = 0.8,
+        .bearing_x = 0.1,
+        .bearing_y = 0.9,
+    }, &opts);
+    defer glyph.deinit(allocator);
+
+    try std.testing.expect(glyph.metrics.width > 16);
+    try std.testing.expect(glyph.metrics.height > 16);
+    try std.testing.expectEqual(
+        @as(usize, glyph.metrics.width) * glyph.metrics.height * SdfType.mtsdf.numChannels(),
+        glyph.pixels.len,
+    );
+    try std.testing.expectEqual(@as(f64, 0.8), glyph.metrics.advance);
+    try std.testing.expectEqual(@as(f64, 0.1), glyph.metrics.bearing_x);
+    try std.testing.expectEqual(@as(f64, 0.9), glyph.metrics.bearing_y);
+
+    // px_range in em units, matching what generateSingle feeds the pipeline
+    // (8px at 64px per em); the winding is normalized by now, so distances
+    // are positive inside.
+    const inside = findDistanceAt(.sdf, shape, .{ 0.5, 0.4 }, 8.0 / 64.0);
+    try std.testing.expect(inside > 0.5);
+    const outside = findDistanceAt(.sdf, shape, .{ -1.0, -1.0 }, 8.0 / 64.0);
+    try std.testing.expect(outside < 0.5);
+
+    var max_px: u8 = 0;
+    for (glyph.pixels) |px| max_px = @max(max_px, px);
+    try std.testing.expect(max_px > 200);
+}
+
+test "generateSingle empty shape" {
+    const allocator = std.testing.allocator;
+    const opts: Options = .{ .sdf_type = .sdf, .px_size = 64, .px_range = 8 };
+
+    var shape: Shape = .{};
+    defer shape.deinit(allocator);
+    const glyph = try generateSingle(allocator, &shape, .{
+        .advance = 0.3,
+        .bearing_x = 0.0,
+        .bearing_y = 0.0,
+    }, &opts);
+    defer glyph.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 0), glyph.metrics.width);
+    try std.testing.expectEqual(@as(u16, 0), glyph.metrics.height);
+    try std.testing.expectEqual(@as(f64, 0.3), glyph.metrics.advance);
+    try std.testing.expectEqual(@as(usize, 0), glyph.pixels.len);
+
+    // A phantom empty contour, as whitespace glyph outlines tend to have.
+    var shape2: Shape = .{};
+    defer shape2.deinit(allocator);
+    var sink: ShapeSink = .{ .allocator = allocator, .shape = &shape2, .scale = 1.0 };
+    try sink.moveTo(.{ 1.0, 1.0 });
+    sink.close();
+    const glyph2 = try generateSingle(allocator, &shape2, .{
+        .advance = 0.0,
+        .bearing_x = 0.0,
+        .bearing_y = 0.0,
+    }, &opts);
+    defer glyph2.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 0), glyph2.metrics.width);
+    try std.testing.expectEqual(@as(usize, 0), glyph2.pixels.len);
 }

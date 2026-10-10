@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const EdgeSegment = @import("EdgeSegment.zig");
-const f64i = @import("Generator.zig").f64i;
+const f64i = @import("core.zig").f64i;
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
 
@@ -45,7 +45,7 @@ pub const EdgeColor = enum(u8) {
 
     pub fn init(rng: *std.Random.DefaultPrng) EdgeColor {
         const two_ch: [3]EdgeColor = .{ .red_green, .red_blue, .green_blue };
-        return two_ch[rng.next() % two_ch.len];
+        return two_ch[@intCast(rng.next() % two_ch.len)];
     }
 
     fn cmyWithExcls(excl_1: EdgeColor, excl_2: EdgeColor) EdgeColor {
@@ -90,7 +90,7 @@ pub const EdgeColor = enum(u8) {
         switch (self.*) {
             inline .red_green, .red_blue, .green_blue => |c| {
                 const switch_targets = comptime colorSwitchTargets(c);
-                self.* = switch_targets[rng.next() % switch_targets.len];
+                self.* = switch_targets[@intCast(rng.next() % switch_targets.len)];
             },
             else => unreachable,
         }
@@ -379,19 +379,19 @@ fn colorGraph(colors: []EdgeColor, edge_matrix: []const []const bool, rng: *std.
         switch (banned_colors) {
             .{} => {
                 const rem_colors: [3]EdgeColor = .{ .red_green, .red_blue, .green_blue };
-                color.* = rem_colors[rng.next() % rem_colors.len];
+                color.* = rem_colors[@intCast(rng.next() % rem_colors.len)];
             },
             .{ .red_green = true } => {
                 const rem_colors: [2]EdgeColor = .{ .red_blue, .green_blue };
-                color.* = rem_colors[rng.next() % rem_colors.len];
+                color.* = rem_colors[@intCast(rng.next() % rem_colors.len)];
             },
             .{ .red_blue = true } => {
                 const rem_colors: [2]EdgeColor = .{ .red_green, .green_blue };
-                color.* = rem_colors[rng.next() % rem_colors.len];
+                color.* = rem_colors[@intCast(rng.next() % rem_colors.len)];
             },
             .{ .green_blue = true } => {
                 const rem_colors: [2]EdgeColor = .{ .red_green, .red_blue };
-                color.* = rem_colors[rng.next() % rem_colors.len];
+                color.* = rem_colors[@intCast(rng.next() % rem_colors.len)];
             },
             .{ .red_green = true, .red_blue = true } => color.* = .green_blue,
             .{ .red_green = true, .green_blue = true } => color.* = .red_blue,
